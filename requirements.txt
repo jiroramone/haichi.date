@@ -5,3 +5,4 @@ openpyxl
 plotly
 lxml
 beautifulsoup4
+requests
