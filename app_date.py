@@ -7,9 +7,9 @@ from bs4 import BeautifulSoup
 import time
 
 # --- 1. 基本設定 ---
-st.set_page_config(page_title="配置馬券 データ収集システム", layout="wide")
+st.set_page_config(page_title="配置馬券 データ収集システム（エラー修正版）", layout="wide")
 
-# 列名の重複を強制的に解消する関数
+# 【重複回避用】列名が重なった場合に自動で番号を振る関数
 def make_columns_unique(df):
     cols = []
     counts = {}
@@ -36,7 +36,7 @@ def normalize_name(x):
 
 JYO_MAP = {'01':'札幌','02':'函館','03':'福島','04':'新潟','05':'東京','06':'中山','07':'中京','08':'京都','09':'阪神','10':'小倉'}
 
-# --- 2. データ読み込み（重複対策強化版） ---
+# --- 2. データ読み込み（重複対策版） ---
 def load_data(file):
     try:
         if file.name.endswith('.xlsx'):
@@ -49,32 +49,28 @@ def load_data(file):
         df = make_columns_unique(df)
 
         # 項目名を探す（20行目までスキャン）
-        header_found = False
         for i in range(min(len(df), 20)):
             row_vals = [str(x) for x in df.iloc[i].values]
             if any('場所' in x or 'R' in x or '馬名' in x for x in row_vals):
                 df.columns = df.iloc[i]
                 df = df.iloc[i+1:].reset_index(drop=True)
-                # ヘッダーとして採用した後にもう一度重複チェック
+                # ヘッダー設定後にもう一度重複を解消
                 df = make_columns_unique(df)
-                header_found = True
                 break
         
         # 列名の名寄せ
         name_map = {'場所':'場名','R':'R','Ｒ':'R','番':'正番','馬番':'正番','着順':'着順','着':'着順','単勝オッズ':'単ｵｯｽﾞ','オッズ':'単ｵｯｽﾞ'}
         new_cols = []
         for c in df.columns:
-            found_map = False
+            target = str(c).strip()
             for k, v in name_map.items():
-                if k in str(c):
-                    new_cols.append(v)
-                    found_map = True
+                if k in target:
+                    target = v
                     break
-            if not found_map:
-                new_cols.append(str(c))
+            new_cols.append(target)
         
         df.columns = new_cols
-        # 名寄せ後に同じ名前（例：場名が2つ）ができたら再度解消
+        # 名寄せ後（「場所」と「会場」が両方「場名」になった場合など）に再度重複を解消
         df = make_columns_unique(df)
 
         # 必須列の確保
@@ -110,7 +106,7 @@ def fetch_netkeiba_result(url):
         return result_map, info, "success"
     except Exception as e: return None, None, str(e)
 
-# --- 4. UI 画面表示 ---
+# --- 4. UI 画面 ---
 st.title("🏇 データ収集システム（重複エラー対策版）")
 
 with st.sidebar:
@@ -121,8 +117,8 @@ with st.sidebar:
         st.divider()
         st.header("💾 3. 保存")
         csv = st.session_state['df'].to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 着順入りCSVを保存", csv, "horse_results.csv")
-        if st.button("🗑️ データをリセット"):
+        st.download_button("📥 CSVをダウンロード", csv, "horse_results.csv")
+        if st.button("🗑️ データをクリア"):
             del st.session_state['df']
             st.rerun()
 
@@ -135,11 +131,11 @@ if up_curr:
             st.error(f"読み込みエラー: {status}")
 
     if 'df' in st.session_state:
-        st.success("✅ データを読み込みました")
+        st.success("✅ ファイルを正常に読み込みました")
         
-        # URL一括貼り付けセクション
+        # URL貼り付けエリア
         st.header("🔗 2. URL一括貼り付け")
-        urls_input = st.text_area("ネット競馬結果URLを1行ずつ貼り付けてください", height=200)
+        urls_input = st.text_area("ネット競馬結果URL（1行に1つずつ）", height=200)
         
         if st.button("🚀 一括取得開始"):
             if urls_input:
@@ -152,7 +148,6 @@ if up_curr:
                     res, info, msg = fetch_netkeiba_result(url)
                     if msg == "success":
                         for u, r in res.items():
-                            # インデックスを特定して更新
                             st.session_state['df'].loc[
                                 (st.session_state['df']['場名']==info['place']) & 
                                 (st.session_state['df']['R']==info['r']) & 
@@ -161,14 +156,14 @@ if up_curr:
                     progress.progress((i+1)/len(urls))
                     time.sleep(1)
                 
-                status_box.success("全レースの取得が完了しました！")
+                status_box.success("全ての取得が完了しました！")
                 st.rerun()
 
         st.divider()
-        st.subheader("📊 データプレビュー")
-        # 表示直前に最終の重複チェックをかけて表示（念のため）
-        display_df = make_columns_unique(st.session_state['df'].copy())
-        st.dataframe(display_df, use_container_width=True)
+        st.subheader("📊 現在のデータ状況")
+        # 表示直前に念のため列名の重複がないか再度クリーンアップ
+        final_df = make_columns_unique(st.session_state['df'].copy())
+        st.dataframe(final_df, use_container_width=True)
 
 else:
-    st.info("👈 左のサイドバーからファイルをアップロードしてください。")
+    st.info("👈 左側のメニューからファイルを読み込ませてください。")
