@@ -187,10 +187,8 @@ def apply_ranking_logic(df_in):
 # --- 5. ネット競馬取得機能 ---
 def fetch_netkeiba_result(url):
     try:
-        # e.g. https://race.netkeiba.com/race/result.html?race_id=...
         dfs = pd.read_html(url, encoding='euc-jp')
         target_df = None
-        # 列名に「着順」と「馬番」が含まれているテーブルを探す
         for d in dfs:
             cols_str = str(d.columns)
             if '着順' in cols_str and '馬番' in cols_str:
@@ -200,19 +198,17 @@ def fetch_netkeiba_result(url):
         if target_df is None:
             return None, "着順データが見つかりませんでした"
         
-        # 列名のスペース削除等の正規化
         target_df.columns = [str(c).replace(' ', '').replace('\n', '') for c in target_df.columns]
         
         result_map = {}
         for _, row in target_df.iterrows():
             try:
-                # 着順が数字のものだけ取得
                 r_val = to_half_width(str(row['着順']))
                 u_val = int(to_half_width(str(row['馬番'])))
                 if r_val.isdigit():
                     result_map[u_val] = int(r_val)
                 else:
-                    result_map[u_val] = 99 # 着外
+                    result_map[u_val] = 99
             except:
                 continue
                 
@@ -254,7 +250,6 @@ if up_curr:
         
         full_df = st.session_state['analyzed_df']
 
-        # ① 結果入力
         st.subheader("📝 結果入力")
         st.caption("手入力、またはネット競馬のURL（レース結果ページ）から自動取得できます。")
         
@@ -272,25 +267,22 @@ if up_curr:
                         with r_tab:
                             race_full = p_df[p_df['R'] == r_num].sort_values('正番')
                             
-                            # URL入力欄
                             c1, c2 = st.columns([3, 1])
                             with c1:
                                 nk_url = st.text_input(f"ネット競馬URL ({place}{r_num}R)", key=f"url_{place}_{r_num}", placeholder="https://race.netkeiba.com/race/result.html...")
                             with c2:
-                                auto_btn = st.form_submit_button(f"🌐 自動取得")
+                                # 【修正箇所】key引数を追加してエラーを回避
+                                auto_btn = st.form_submit_button(f"🌐 自動取得", key=f"btn_{place}_{r_num}")
                             
-                            # 自動取得処理
                             if auto_btn and nk_url:
                                 ranks, msg = fetch_netkeiba_result(nk_url)
                                 if msg == "success":
                                     st.success(f"{len(ranks)}頭の着順を取得しました！")
-                                    # データ反映
                                     for umaban, rank in ranks.items():
                                         race_full.loc[race_full['正番'] == umaban, '着順'] = rank
                                 else:
                                     st.error(f"エラー: {msg}")
 
-                            # データ表示・編集 (着順を馬名の横に配置)
                             disp = race_full.copy()
                             if disp.empty:
                                 st.caption("データなし")
@@ -302,18 +294,15 @@ if up_curr:
                                     use_container_width=True, 
                                     key=f"ed_{place}_{r_num}"
                                 )
-                                # 編集結果を反映
                                 updated = race_full.copy()
                                 for _, row in ed.iterrows():
                                     updated.loc[updated['正番'] == row['正番'], '着順'] = row['着順']
                                 edited_dfs.append(updated)
             
-            # 確定ボタン
             if st.form_submit_button("🔄 入力を確定して全体を更新"):
                 st.session_state['analyzed_df'] = apply_ranking_logic(pd.concat(edited_dfs, ignore_index=True))
                 st.rerun()
 
-        # ② 推奨馬
         st.divider()
         st.subheader("👑 特選推奨馬")
         future_df = full_df[(full_df['着順'].isna()) & (full_df['総合スコア'] >= 10)]
@@ -331,7 +320,6 @@ if up_curr:
                                 hide_index=True
                             )
 
-        # ③ 統計
         st.divider()
         st.subheader("📈 的中傾向 (会場別)")
         df_res = full_df[full_df['着順'].notna()].copy()
