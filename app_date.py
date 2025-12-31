@@ -4,9 +4,10 @@ import numpy as np
 import re
 import plotly.express as px
 import urllib.request
+from bs4 import BeautifulSoup
 
 # --- 1. 基本設定 ---
-st.set_page_config(page_title="配置馬券術 分析システム（データ収集用）", layout="wide")
+st.set_page_config(page_title="配置馬券術 データ収集システム", layout="wide")
 
 # 半角変換ヘルパー
 def to_half_width(text):
@@ -15,6 +16,7 @@ def to_half_width(text):
     table = str.maketrans('０１２３４５６７８９．', '0123456789.')
     return re.sub(r'[^\d\.]', '', text.translate(table))
 
+# 名前正規化
 def normalize_name(x):
     if pd.isna(x): return ''
     s = str(x).strip().replace('　', '').replace(' ', '')
@@ -148,29 +150,40 @@ def apply_ranking_logic(df_in):
     df[['総合スコア', 'エネルギー状態', '推奨買い目']] = df.apply(get_metrics, axis=1)
     return df
 
-# --- 5. ネット競馬自動取得 (修正版) ---
+# --- 5. ネット競馬自動取得 (BeautifulSoup版) ---
 def fetch_netkeiba_result(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req) as response:
             html = response.read().decode('euc-jp', errors='replace')
-        dfs = pd.read_html(html)
-        target_df = None
-        for d in dfs:
-            if '着順' in str(d.columns) and '馬番' in str(d.columns):
-                target_df = d; break
-        if target_df is None: return None, "着順データが見つかりませんでした"
-        target_df.columns = [str(c).replace(' ', '').replace('\n', '') for c in target_df.columns]
+        
+        soup = BeautifulSoup(html, 'html.parser')
+        table = soup.find('table', id='All_Result_Table')
+        
+        if not table:
+            return None, "着順テーブル(All_Result_Table)が見つかりませんでした"
+
         result_map = {}
-        for _, row in target_df.iterrows():
+        rows = table.find_all('tr', class_='HorseList')
+        
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) < 3: continue
             try:
-                r_val = to_half_width(str(row['着順']))
-                u_val = int(to_half_width(str(row['馬番'])))
-                result_map[u_val] = int(r_val) if r_val.isdigit() else 99
+                rank_text = cols[0].get_text(strip=True)
+                umaban_text = cols[2].get_text(strip=True)
+                rank_match = re.search(r'\d+', rank_text)
+                umaban_match = re.search(r'\d+', umaban_text)
+                if rank_match and umaban_match:
+                    result_map[int(umaban_match.group())] = int(rank_match.group())
+                elif umaban_match:
+                    result_map[int(umaban_match.group())] = 99 # 数字以外は着外扱い
             except: continue
+                
         return result_map, "success"
-    except Exception as e: return None, str(e)
+    except Exception as e:
+        return None, str(e)
 
 # --- 6. UI ---
 st.title("🏇 配置馬券術 分析システム（データ収集用）")
@@ -194,35 +207,63 @@ if up_curr:
     df_p_raw, _ = load_data(up_prev) if up_prev else (None, None)
     if status == "success":
         if 'analyzed_df' not in st.session_state: st.session_state['analyzed_df'] = apply_ranking_logic(analyze_haichi(df_raw, df_p_raw))
+        
+        # 内部データの更新用に関数化
+        def update_ranks(fetched_ranks):
+            df = st.session_state['analyzed_df'].copy()
+            for u, r in fetched_ranks.items():
+                # 場名とR、正番が一致する行を更新
+                # (URLが1レースごとなので、全レース一括更新はUI側のループで処理)
+                pass
+
         full_df = st.session_state['analyzed_df']
         st.subheader("📝 結果入力")
+        
+        # 結果入力フォーム
         with st.form("result_form"):
             places = sorted(full_df['場名'].unique())
             p_tabs = st.tabs(places); edited_dfs = []
             for p_tab, place in zip(p_tabs, places):
                 with p_tab:
                     p_df = full_df[full_df['場名'] == place]
-                    r_tabs = st.tabs([f"{r}R" for r in sorted(p_df['R'].unique())])
-                    for r_tab, r_num in zip(r_tabs, sorted(p_df['R'].unique())):
+                    r_nums = sorted(p_df['R'].unique())
+                    r_tabs = st.tabs([f"{r}R" for r in r_nums])
+                    for r_tab, r_num in zip(r_tabs, r_nums):
                         with r_tab:
                             race_full = p_df[p_df['R'] == r_num].sort_values('正番')
+                            
+                            # 自動取得エリア
                             c1, c2 = st.columns([3, 1])
-                            with c1: nk_url = st.text_input(f"ネット競馬URL", key=f"url_{place}_{r_num}")
-                            with c2: auto_btn = st.form_submit_button(f"🌐 自動取得", key=f"btn_{place}_{r_num}")
+                            with c1: nk_url = st.text_input(f"ネット競馬URL ({place}{r_num}R)", key=f"url_{place}_{r_num}")
+                            with c2: 
+                                # 各レースごとの自動取得ボタン
+                                auto_btn = st.form_submit_button(f"🌐 自動取得", key=f"btn_{place}_{r_num}")
+                            
                             if auto_btn and nk_url:
                                 res, msg = fetch_netkeiba_result(nk_url)
                                 if msg == "success":
-                                    st.success("取得成功！")
-                                    for u, r in res.items(): race_full.loc[race_full['正番'] == u, '着順'] = r
+                                    st.success(f"{len(res)}頭の着順を取得しました！")
+                                    for u, r in res.items():
+                                        race_full.loc[race_full['正番'] == u, '着順'] = r
                                 else: st.error(f"取得失敗: {msg}")
-                            ed = st.data_editor(race_full[['正番','馬名','着順','単ｵｯｽﾞ','属性','エネルギー状態','総合スコア']], hide_index=True, use_container_width=True, key=f"ed_{place}_{r_num}")
+                            
+                            # データ表示・編集
+                            ed = st.data_editor(
+                                race_full[['正番','馬名','着順','単ｵｯｽﾞ','属性','エネルギー状態','総合スコア']], 
+                                hide_index=True, use_container_width=True, key=f"ed_{place}_{r_num}"
+                            )
+                            # 編集結果を収集
                             updated = race_full.copy()
-                            for _, row in ed.iterrows(): updated.loc[updated['正番'] == row['正番'], '着順'] = row['着順']
+                            for _, row in ed.iterrows():
+                                updated.loc[updated['正番'] == row['正番'], '着順'] = row['着順']
                             edited_dfs.append(updated)
-            if st.form_submit_button("🔄 確定して更新"):
-                st.session_state['analyzed_df'] = apply_ranking_logic(pd.concat(edited_dfs, ignore_index=True)); st.rerun()
+            
+            # 全体確定ボタン
+            if st.form_submit_button("🔄 入力を確定して全体を更新"):
+                st.session_state['analyzed_df'] = apply_ranking_logic(pd.concat(edited_dfs, ignore_index=True))
+                st.rerun()
 
-        # 推奨馬と統計
+        # 推奨馬表示
         st.divider(); st.subheader("👑 特選推奨馬")
         future_df = full_df[(full_df['着順'].isna()) & (full_df['総合スコア'] >= 10)]
         if not future_df.empty:
