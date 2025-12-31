@@ -267,9 +267,9 @@ if up_curr:
                                 st.caption("データなし")
                                 edited_dfs.append(race_full)
                             else:
-                                # 入力用テーブル表示
+                                # 入力用テーブル表示（着順を馬名の横に移動）
                                 ed = st.data_editor(
-                                    disp[['正番','馬名','単ｵｯｽﾞ','属性','エネルギー状態','総合スコア','着順','推奨買い目']], 
+                                    disp[['正番','馬名','着順','単ｵｯｽﾞ','属性','エネルギー状態','総合スコア','推奨買い目']], 
                                     hide_index=True, 
                                     use_container_width=True, 
                                     key=f"ed_{place}_{r_num}"
