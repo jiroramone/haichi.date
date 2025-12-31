@@ -4,39 +4,47 @@ import numpy as np
 import re
 import requests
 from bs4 import BeautifulSoup
+import urllib.request
 import time
 
 # --- 1. 基本設定 ---
-st.set_page_config(page_title="データ収集システム（重複カラム完全回避版）", layout="wide")
+st.set_page_config(page_title="配置馬券 データ収集システム（一括版）", layout="wide")
 
-# カラム名の重複を「完全に」排除する関数
-def fix_duplicate_cols(df):
-    cols = []
-    counts = {}
-    for col in df.columns:
-        c_name = str(col).strip() if pd.notna(col) else "Unnamed"
-        if c_name in counts:
-            counts[c_name] += 1
-            cols.append(f"{c_name}_{counts[c_name]}")
-        else:
-            counts[c_name] = 0
-            cols.append(c_name)
-    df.columns = cols
-    return df
+# 競馬場コードのマッピング（URL解析用）
+JYO_MAP = {
+    '01': '札幌', '02': '函館', '03': '福島', '04': '新潟', '05': '東京',
+    '06': '中山', '07': '中京', '08': '京都', '09': '阪神', '10': '小倉'
+}
 
 def to_half_width(text):
     if pd.isna(text): return text
+    text = str(text)
     table = str.maketrans('０１２３４５６７８９．', '0123456789.')
-    return re.sub(r'[^\d\.]', '', str(text).translate(table))
+    return re.sub(r'[^\d\.]', '', text.translate(table))
 
 def normalize_name(x):
     if pd.isna(x): return ''
     s = str(x).strip().replace('　', '').replace(' ', '')
-    return re.split(r'[,(（/]', s)[0]
+    s = re.split(r'[,(（/]', s)[0]
+    return re.sub(r'[★☆▲△◇$*]', '', s)
 
-JYO_MAP = {'01':'札幌','02':'函館','03':'福島','04':'新潟','05':'東京','06':'中山','07':'中京','08':'京都','09':'阪神','10':'小倉'}
+# 列名の重複を避ける関数
+def make_columns_unique(df):
+    cols = []
+    counts = {}
+    for col in df.columns:
+        c_str = str(col).strip()
+        if c_str in counts:
+            counts[c_str] += 1
+            cols.append(f"{c_str}_{counts[c_str]}")
+        else:
+            counts[c_str] = 0
+            cols.append(c_str)
+    df.columns = cols
+    return df
 
 # --- 2. データ読み込み ---
+@st.cache_data
 def load_data(file):
     try:
         if file.name.endswith('.xlsx'):
@@ -45,108 +53,184 @@ def load_data(file):
             try: df = pd.read_csv(file, encoding='utf-8')
             except: df = pd.read_csv(file, encoding='cp932')
         
-        # 読み込み直後のクリーンアップ
-        df = fix_duplicate_cols(df)
+        df = make_columns_unique(df)
 
-        # 項目名行の探索
-        for i in range(min(len(df), 20)):
-            row_vals = [str(x) for x in df.iloc[i].values]
-            if any('場所' in x or 'R' in x or '馬名' in x for x in row_vals):
-                df.columns = df.iloc[i]
-                df = df.iloc[i+1:].reset_index(drop=True)
-                df = fix_duplicate_cols(df)
-                break
-        
-        # 列名の名寄せ
-        name_map = {'場所':'場名','R':'R','Ｒ':'R','番':'正番','馬番':'正番','着順':'着順','着':'着順','単勝オッズ':'単ｵｯｽﾞ','オッズ':'単ｵｯｽﾞ'}
-        new_cols = []
-        for c in df.columns:
-            c_str = str(c).strip()
-            mapped_name = c_str
-            for k, v in name_map.items():
-                if k == c_str: # 完全一致を優先
-                    mapped_name = v
+        found_header = False
+        if not any(col in str(df.columns) for col in ['場所', '馬', '番', 'R']):
+            for i in range(min(len(df), 10)):
+                row_values = [str(x) for x in df.iloc[i].values]
+                if any('場所' in x or '番' in x or 'R' in x for x in row_values):
+                    df.columns = df.iloc[i]
+                    df = df.iloc[i+1:].reset_index(drop=True)
+                    df = make_columns_unique(df)
+                    found_header = True
                     break
-            new_cols.append(mapped_name)
-        
-        df.columns = new_cols
-        # 名寄せ後に重複が発生する（例：元々「場名」があって「場所」も「場名」になった場合）ので再度修正
-        df = fix_duplicate_cols(df)
 
-        for col in ['場名', 'R', '正番', '着順']:
-            if col not in df.columns: df[col] = np.nan
+        df.columns = df.columns.astype(str).str.strip()
+        name_map = {
+            '場所': '場名', '競馬場': '場名', '開催': '場名',
+            'レース': 'R', 'Ｒ': 'R', '番': '正番', '馬番': '正番',
+            '単オッズ': '単ｵｯｽﾞ', '単勝オッズ': '単ｵｯｽﾞ', 'オッズ': '単ｵｯｽﾞ',
+            '着': '着順'
+        }
+        df = df.rename(columns=name_map)
+        df = make_columns_unique(df)
         
-        return df, "success"
+        ensure_cols = ['R', '場名', '馬名', '正番', '騎手', '厩舎', '馬主', '単ｵｯｽﾞ', '着順']
+        for col in ensure_cols:
+            if col not in df.columns: df[col] = np.nan
+
+        df['R'] = pd.to_numeric(df['R'].apply(to_half_width), errors='coerce')
+        df['正番'] = pd.to_numeric(df['正番'].apply(to_half_width), errors='coerce')
+        df = df.dropna(subset=['R', '正番'])
+        df['R'] = df['R'].astype(int); df['正番'] = df['正番'].astype(int)
+        
+        for col in ['騎手', '厩舎', '馬主', '馬名', '場名']:
+            df[col] = df[col].astype(str).apply(normalize_name)
+            
+        df['単ｵｯｽﾞ'] = pd.to_numeric(df['単ｵｯｽﾞ'].apply(to_half_width), errors='coerce')
+        return df.copy(), "success"
     except Exception as e:
         return pd.DataFrame(), str(e)
 
-# --- 3. ネット競馬データ取得 ---
+# --- 3. ネット競馬自動取得 ---
 def fetch_netkeiba_result(url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+            'Referer': 'https://race.netkeiba.com/'
+        }
         response = requests.get(url, headers=headers, timeout=10)
         response.encoding = 'EUC-JP'
-        rid_m = re.search(r'race_id=(\d{12})', url)
-        info = {"place": JYO_MAP.get(rid_m.group(1)[4:6], "") if rid_m else "", "r": int(rid_m.group(1)[10:12]) if rid_m else 0}
+        if response.status_code != 200: return None, None, f"拒否({response.status_code})"
+
+        # URLから場名とRを抽出 (例: race_id=2025 06 0506 01)
+        # 06=中山(JYO_MAP), 01=1R
+        race_id_match = re.search(r'race_id=(\d{12})', url)
+        info = {"place": "", "r": 0}
+        if race_id_match:
+            rid = race_id_match.group(1)
+            info["place"] = JYO_MAP.get(rid[4:6], "")
+            info["r"] = int(rid[10:12])
+
         soup = BeautifulSoup(response.text, 'html.parser')
-        table = soup.find('table', id='All_Result_Table') or soup.find('table', class_=lambda x: x and 'ResultRefund' in x)
-        if not table: return None, info, "表なし"
-        res_map = {}
-        rows = table.find_all('tr', class_=lambda x: x and 'HorseList' in x)
-        for row in rows:
+        tables = soup.find_all('table')
+        target_table = None
+        for t in tables:
+            t_text = t.get_text()
+            if '着順' in t_text and '馬番' in t_text:
+                target_table = t
+                break
+        
+        if not target_table: return None, info, "表なし"
+
+        result_map = {}
+        rows = target_table.find_all('tr')
+        header_cols = [th.get_text(strip=True) for th in rows[0].find_all(['th', 'td'])]
+        
+        try:
+            idx_rank = [i for i, c in enumerate(header_cols) if '着順' in c][0]
+            idx_umaban = [i for i, c in enumerate(header_cols) if '馬番' in c][0]
+        except: return None, info, "列特定不可"
+
+        for row in rows[1:]:
             cols = row.find_all('td')
-            if len(cols) < 3: continue
-            r_m = re.search(r'\d+', cols[0].get_text(strip=True))
-            u_m = re.search(r'\d+', cols[2].get_text(strip=True))
-            if u_m: res_map[int(u_m.group())] = int(r_m.group()) if r_m else 99
-        return res_map, info, "success"
+            if len(cols) <= max(idx_rank, idx_umaban): continue
+            r_txt = cols[idx_rank].get_text(strip=True)
+            u_txt = cols[idx_umaban].get_text(strip=True)
+            r_m = re.search(r'\d+', r_txt)
+            u_m = re.search(r'\d+', u_txt)
+            if r_m and u_m: result_map[int(u_m.group())] = int(r_m.group())
+            elif u_m: result_map[int(u_m.group())] = 99
+        
+        return result_map, info, "success"
     except Exception as e: return None, None, str(e)
 
-# --- 4. UI 表示 ---
-st.title("🏇 データ収集システム（重複回避・最終版）")
+# --- 4. UI 画面表示 ---
+st.title("🏇 配置馬券 データ収集システム（URL一括取得版）")
 
-up_curr = st.sidebar.file_uploader("当日配置表を選択", type=['xlsx', 'csv'])
+with st.sidebar:
+    st.header("📂 1. データ読み込み")
+    up_curr = st.file_uploader("当日データ(Excel/CSV)", type=['xlsx', 'csv'], key="curr")
+    
+    if 'analyzed_df' in st.session_state:
+        st.divider()
+        st.header("💾 3. 保存")
+        csv = st.session_state['analyzed_df'].to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 着順入りCSVを保存", csv, "horse_data_with_results.csv")
+        if st.button("🗑️ データをリセット"):
+            del st.session_state['analyzed_df']
+            st.rerun()
 
 if up_curr:
-    # ファイルが新しくアップロードされた場合のみセッションを初期化
-    if 'df' not in st.session_state:
-        df, status = load_data(up_curr)
-        if status == "success":
-            st.session_state['df'] = df
-        else:
-            st.error(f"読み込みエラー: {status}")
-
-    if 'df' in st.session_state:
-        st.success("✅ データを読み込みました")
+    df_raw, status = load_data(up_curr)
+    if status == "success" and not df_raw.empty:
+        if 'analyzed_df' not in st.session_state:
+            st.session_state['analyzed_df'] = df_raw
         
-        # 1. 一括取得セクション
-        st.header("🔗 1. URL一括貼り付け")
-        urls_input = st.text_area("ネット競馬結果URL（1行に1つ）", height=150)
-        if st.button("🚀 一括取得開始"):
-            if urls_input:
-                urls = [u.strip() for u in urls_input.split('\n') if u.strip()]
-                progress = st.progress(0)
-                for i, url in enumerate(urls):
-                    res, info, msg = fetch_netkeiba_result(url)
-                    if msg == "success":
-                        for u, r in res.items():
-                            st.session_state['df'].loc[(st.session_state['df']['場名']==info['place']) & (st.session_state['df']['R']==info['r']) & (st.session_state['df']['正番']==u), '着順'] = r
-                    progress.progress((i+1)/len(urls))
-                    time.sleep(1)
-                st.rerun()
+        # --- 複数URL一括取得セクション ---
+        st.header("🔗 2. URL一括読み込み")
+        with st.expander("ここをクリックしてURLをまとめて貼り付けてください", expanded=True):
+            urls_area = st.text_area("ネット競馬のレース結果URL（1行に1つずつ貼り付け）", height=150, help="例: https://race.netkeiba.com/race/result.html?race_id=202506050601")
+            if st.button("🚀 一括取得を開始する"):
+                urls = [u.strip() for u in urls_area.split('\n') if u.strip()]
+                if not urls:
+                    st.error("URLが入力されていません。")
+                else:
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    success_count = 0
+                    
+                    for i, url in enumerate(urls):
+                        status_text.text(f"取得中 ({i+1}/{len(urls)}): {url[-12:]}...")
+                        res, info, msg = fetch_netkeiba_result(url)
+                        
+                        if msg == "success" and info["place"]:
+                            for umaban, rank in res.items():
+                                st.session_state['analyzed_df'].loc[
+                                    (st.session_state['analyzed_df']['場名'] == info["place"]) & 
+                                    (st.session_state['analyzed_df']['R'] == info["r"]) & 
+                                    (st.session_state['analyzed_df']['正番'] == umaban), '着順'
+                                ] = rank
+                            success_count += 1
+                        else:
+                            st.warning(f"スキップ: {url[-12:]} - {msg}")
+                        
+                        progress_bar.progress((i + 1) / len(urls))
+                        time.sleep(1) # サーバー負荷軽減
+                    
+                    status_text.success(f"完了！ {len(urls)}件中 {success_count}件のレース結果を反映しました。")
+                    st.rerun()
 
-        # 2. プレビューセクション
+        # --- 個別確認・修正セクション ---
         st.divider()
-        st.subheader("📊 現在のデータ状況")
+        df_work = st.session_state['analyzed_df']
+        places = [p for p in df_work['場名'].unique().tolist() if str(p) != 'nan' and p != '']
         
-        # 表示直前にダメ押しで重複を排除
-        display_df = fix_duplicate_cols(st.session_state['df'].copy())
-        st.dataframe(display_df, use_container_width=True)
-        
-        # 保存セクション
-        csv = st.session_state['df'].to_csv(index=False).encode('utf-8-sig')
-        st.sidebar.download_button("📥 CSVをダウンロード", csv, "horse_results.csv")
-        if st.sidebar.button("🗑️ データをリセット"):
-            del st.session_state['df']; st.rerun()
-else:
-    st.info("👈 左側のメニューからファイルをアップロードしてください。")
+        if places:
+            st.subheader("📊 データの確認・個別修正")
+            p_tabs = st.tabs(places)
+            for p_tab, place in zip(p_tabs, places):
+                with p_tab:
+                    p_df = df_work[df_work['場名'] == place]
+                    r_nums = sorted([int(r) for r in p_df['R'].unique() if not pd.isna(r)])
+                    if r_nums:
+                        r_num = st.selectbox(f"レースを選択 ({place})", r_nums, key=f"sel_{place}")
+                        current_race_data = df_work[(df_work['場名'] == place) & (df_work['R'] == r_num)].sort_values('正番')
+                        
+                        edited_data = st.data_editor(
+                            current_race_data[['正番', '馬名', '着順', '単ｵｯｽﾞ']],
+                            hide_index=True, use_container_width=True, key=f"ed_{place}_{r_num}"
+                        )
+                        
+                        if st.button(f"✅ {place}{r_num}R の変更を保存", key=f"save_{place}_{r_num}"):
+                            for _, row in edited_data.iterrows():
+                                st.session_state['analyzed_df'].loc[
+                                    (st.session_state['analyzed_df']['場名'] == place) & 
+                                    (st.session_state['analyzed_df']['R'] == r_num) & 
+                                    (st.session_state['analyzed_df']['正番'] == row['正番']), '着順'
+                                ] = row['着順']
+                            st.rerun()
+    else:
+        if up_curr:
+            st.error(f"読み込み失敗: {status}")
